@@ -1,0 +1,161 @@
+# Import necessary libraries
+
+import os
+import re
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.model_selection import train_test_split
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.naive_bayes import MultinomialNB
+from sklearn.svm import LinearSVC
+from sklearn.ensemble import RandomForestClassifier, ExtraTreesClassifier, AdaBoostClassifier
+from sklearn.tree import DecisionTreeClassifier
+from xgboost import XGBClassifier
+from catboost import CatBoostClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import classification_report, accuracy_score
+from sklearn.pipeline import Pipeline
+from nltk.sentiment.vader import SentimentIntensityAnalyzer
+from bs4 import BeautifulSoup
+import nltk
+from nltk.corpus import stopwords
+from nltk.stem.snowball import SnowballStemmer
+from sklearn.preprocessing import LabelEncoder
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Dense, Dropout
+
+# Download NLTK resources
+nltk.download('stopwords')
+nltk.download('vader_lexicon')
+
+# Set directory and load dataset
+os.chdir(r"C:\Users\zohaib khan\OneDrive\Desktop\USE ME\dump\zk")
+data = pd.read_csv("NLP2.csv", encoding='ISO-8859-1')
+
+# Remove duplicates and missing values
+data = data.drop_duplicates(subset=["Content"])
+data = data.dropna(subset=["Content"]).reset_index(drop=True)
+
+# Initialize VADER sentiment analyzer and calculate compound score
+sia = SentimentIntensityAnalyzer()
+data['Compound_Score'] = data['Content'].apply(lambda x: sia.polarity_scores(str(x))['compound'])
+
+# Define stopwords and stemmer
+stops = set(stopwords.words("english"))
+stemmer = SnowballStemmer("english")
+
+# Text cleaning function
+def clean_text(text):
+    text = re.sub(r'http\S+', '', text)
+    text = re.sub(r'[^A-Za-z0-9 ]+', '', text)
+    text = re.sub(r'\s+', ' ', text)
+    return text.strip().lower()
+
+def review_to_words(raw_review):
+    review_text = BeautifulSoup(raw_review, 'html.parser').get_text()
+    words = re.sub(r'[^A-Za-z0-9 ]+', ' ', review_text).lower().split()
+    meaningful_words = [w for w in words if w not in stops]
+    stemmed_words = [stemmer.stem(w) for w in meaningful_words]
+    return ' '.join(stemmed_words)
+
+# Apply text cleaning
+data["Content"] = data["Content"].apply(clean_text).apply(review_to_words)
+
+# Encode labels for the 'Sentiment' column
+label_encoder = LabelEncoder()
+data['Sentiment'] = label_encoder.fit_transform(data['Sentiment'])
+
+# Split data
+X = data["Content"]
+y = data["Sentiment"]
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+# Define models with tuned hyperparameters
+models = {
+    "Naive Bayes": MultinomialNB(),
+    "Support Vector Classifier": LinearSVC(),
+    "Random Forest": RandomForestClassifier(n_estimators=200, max_depth=20, random_state=42),
+    "Decision Tree": DecisionTreeClassifier(max_depth=15, random_state=42),
+    "XGBoost": XGBClassifier(n_estimators=100, max_depth=5, use_label_encoder=False, eval_metric='mlogloss', random_state=42),
+    "Extra Trees": ExtraTreesClassifier(n_estimators=100, max_depth=20, random_state=42),
+    "AdaBoost": AdaBoostClassifier(n_estimators=100, random_state=42),
+    "Logistic Regression": LogisticRegression(max_iter=200, random_state=42),
+    "CatBoost": CatBoostClassifier(iterations=100, depth=6, silent=True, random_state=42)
+}
+
+# Add neural network model
+def build_ann_model():
+    model = Sequential([
+        Dense(128, activation='relu', input_shape=(5000,)),
+        Dropout(0.3),
+        Dense(64, activation='relu'),
+        Dropout(0.3),
+        Dense(3, activation='softmax')
+    ])
+    model.compile(optimizer='adam', loss='sparse_categorical_crossentropy', metrics=['accuracy'])
+    return model
+
+# Vectorizer
+tfidf = TfidfVectorizer(max_features=5000, ngram_range=(1,2))
+
+# Store results
+results = {}
+predictions = pd.DataFrame()
+
+# Train and evaluate models
+for model_name, model in models.items():
+    pipeline = Pipeline([
+        ("tfidf", tfidf),
+        ("classifier", model)
+    ])
+    pipeline.fit(X_train, y_train)
+    y_pred = pipeline.predict(X_test)
+    accuracy = accuracy_score(y_test, y_pred)
+    report = classification_report(y_test, y_pred, output_dict=True)
+    results[model_name] = {
+        "accuracy": accuracy,
+        "classification_report": report
+    }
+    # Store predictions for comparison
+    predictions[model_name] = y_pred
+
+# Neural Network Training
+tfidf_train = tfidf.fit_transform(X_train).toarray()
+tfidf_test = tfidf.transform(X_test).toarray()
+ann_model = build_ann_model()
+ann_model.fit(tfidf_train, y_train, epochs=5, batch_size=32, validation_split=0.2, verbose=1)
+y_pred_ann = ann_model.predict(tfidf_test).argmax(axis=1)
+results["ANN"] = {
+    "accuracy": accuracy_score(y_test, y_pred_ann),
+    "classification_report": classification_report(y_test, y_pred_ann, output_dict=True)
+}
+predictions["ANN"] = y_pred_ann
+
+# Display results
+for model_name, result in results.items():
+    print(f"\nModel: {model_name}")
+    print(f"Accuracy: {result['accuracy']:.4f}")
+    print("Classification Report:")
+    print(pd.DataFrame(result["classification_report"]).transpose())
+
+# Add the best model's predictions to the dataset for comparison
+best_model_name = max(results, key=lambda k: results[k]['accuracy'])
+best_pipeline = Pipeline([
+    ("tfidf", tfidf),
+    ("classifier", models[best_model_name])
+])
+best_pipeline.fit(X_train, y_train)
+data["Predicted_Sentiment"] = label_encoder.inverse_transform(best_pipeline.predict(X))
+
+# Show a few rows to verify prediction results
+print("\nSample of Original vs Predicted Sentiments:")
+print(data[["Content", "Sentiment", "Predicted_Sentiment"]].head())
+
+# Visualize compound score distribution
+plt.figure(figsize=(10, 6))
+sns.histplot(data['Compound_Score'], kde=True, bins=20)
+plt.title("Distribution of VADER Compound Scores")
+plt.xlabel("Compound Score")
+plt.ylabel("Frequency")
+plt.show()
